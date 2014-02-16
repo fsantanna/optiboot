@@ -228,6 +228,8 @@ void uartDelay() __attribute__ ((naked));
 #endif
 void appStart() __attribute__ ((naked));
 
+void boot_program_page (uint32_t page, uint8_t *buf);
+
 #if defined(__AVR_ATmega168__) || defined(__AVR_ATmega168P__)
 #define RAMSTART (0x100)
 #define NRWWSTART (0x3800)
@@ -378,19 +380,18 @@ int main(void) {
     else if(ch == STK_PROG_PAGE) {
       // PROGRAM PAGE - we support flash programming only, not EEPROM
       uint8_t *bufPtr;
-      uint16_t addrPtr;
 
       getch();			/* getlen() */
       length = getch();
       getch();
 
-      // If we are in RWW section, immediately start page erase
-      if (address < NRWWSTART) __boot_page_erase_short((uint16_t)(void*)address);
-
       // While that is going on, read in page contents
       bufPtr = buff;
       do *bufPtr++ = getch();
       while (--length);
+
+      // If we are in RWW section, immediately start page erase
+      if (address < NRWWSTART) __boot_page_erase_short((uint16_t)(void*)address);
 
       // If we are in NRWW section, page erase has to be delayed until now.
       // Todo: Take RAMPZ into account
@@ -399,50 +400,7 @@ int main(void) {
       // Read command terminator, start reply
       verifySpace();
 
-      // If only a partial page is to be programmed, the erase might not be complete.
-      // So check that here
-      boot_spm_busy_wait();
-
-#ifdef VIRTUAL_BOOT_PARTITION
-      if ((uint16_t)(void*)address == 0) {
-        // This is the reset vector page. We need to live-patch the code so the
-        // bootloader runs.
-        //
-        // Move RESET vector to WDT vector
-        uint16_t vect = buff[0] | (buff[1]<<8);
-        rstVect = vect;
-        wdtVect = buff[8] | (buff[9]<<8);
-        vect -= 4; // Instruction is a relative jump (rjmp), so recalculate.
-        buff[8] = vect & 0xff;
-        buff[9] = vect >> 8;
-
-        // Add jump to bootloader at RESET vector
-        buff[0] = 0x7f;
-        buff[1] = 0xce; // rjmp 0x1d00 instruction
-      }
-#endif
-
-      // Copy buffer into programming buffer
-      bufPtr = buff;
-      addrPtr = (uint16_t)(void*)address;
-      ch = SPM_PAGESIZE / 2;
-      do {
-        uint16_t a;
-        a = *bufPtr++;
-        a |= (*bufPtr++) << 8;
-        __boot_page_fill_short((uint16_t)(void*)addrPtr,a);
-        addrPtr += 2;
-      } while (--ch);
-
-      // Write from programming buffer
-      __boot_page_write_short((uint16_t)(void*)address);
-      boot_spm_busy_wait();
-
-#if defined(RWWSRE)
-      // Reenable read access to flash
-      boot_rww_enable();
-#endif
-
+      boot_program_page((uint32_t) address, buff);
     }
     /* Read memory block mode, length is big endian.  */
     else if(ch == STK_READ_PAGE) {
@@ -672,3 +630,100 @@ void appStart() {
     "ijmp\n"
   );
 }
+
+void boot_program_page (uint32_t page, uint8_t *buf)
+{
+      uint8_t ch;
+      uint8_t *bufPtr;
+      uint16_t addrPtr;
+
+      // If only a partial page is to be programmed, the erase might not be complete.
+      // So check that here
+      boot_spm_busy_wait();
+
+#ifdef VIRTUAL_BOOT_PARTITION
+      if (page == 0) {
+        // This is the reset vector page. We need to live-patch the code so the
+        // bootloader runs.
+        //
+        // Move RESET vector to WDT vector
+        uint16_t vect = buff[0] | (buff[1]<<8);
+        rstVect = vect;
+        wdtVect = buff[8] | (buff[9]<<8);
+        vect -= 4; // Instruction is a relative jump (rjmp), so recalculate.
+        buff[8] = vect & 0xff;
+        buff[9] = vect >> 8;
+
+        // Add jump to bootloader at RESET vector
+        buff[0] = 0x7f;
+        buff[1] = 0xce; // rjmp 0x1d00 instruction
+      }
+#endif
+
+      // Copy buffer into programming buffer
+      bufPtr = buff;
+      addrPtr = page;
+      ch = SPM_PAGESIZE / 2;
+      do {
+        uint16_t a;
+        a = *bufPtr++;
+        a |= (*bufPtr++) << 8;
+        boot_page_fill((uint32_t)addrPtr,a);
+        addrPtr += 2;
+      } while (--ch);
+
+      // Write from programming buffer
+      boot_page_write(page);
+      boot_spm_busy_wait();
+
+#if defined(RWWSRE)
+      // Reenable read access to flash
+      boot_rww_enable();
+#endif
+}
+
+/*
+#include <inttypes.h>
+#include <avr/interrupt.h>
+#include <avr/pgmspace.h>
+
+void boot_program_page (uint32_t page, uint8_t *buf)
+{
+    uint16_t i;
+    //uint8_t sreg;
+
+    // Disable interrupts.
+
+    //sreg = SREG;
+    //cli();
+
+    //eeprom_busy_wait ();
+
+    boot_page_erase (page);
+    boot_spm_busy_wait ();      // Wait until the memory is erased.
+
+    for (i=0; i<SPM_PAGESIZE; i+=2)
+    {
+        // Set up little-endian word.
+
+        uint16_t w = *buf++;
+        w += (*buf++) << 8;
+    
+        boot_page_fill (page + i, w);
+    }
+
+    boot_page_write (page);     // Store buffer in flash page.
+    boot_spm_busy_wait();       // Wait until the memory is written.
+
+    // Reenable RWW-section again. We need this if we want to jump back
+    // to the application after bootloading.
+
+#if defined(RWWSRE)
+    boot_rww_enable ();
+#endif
+
+    // Re-enable interrupts (if they were ever enabled).
+
+    //SREG = sreg;
+}
+*/
