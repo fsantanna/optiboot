@@ -661,7 +661,7 @@ void boot_program_page (uint32_t page, uint8_t *buf)
 #endif
 
       // Copy buffer into programming buffer
-      bufPtr = buff;
+      bufPtr = buf;
       addrPtr = page;
       ch = SPM_PAGESIZE / 2;
       do {
